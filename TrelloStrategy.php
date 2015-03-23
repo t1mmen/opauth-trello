@@ -3,154 +3,236 @@
  * Trello strategy for Opauth
  *
  * Based on work by U-Zyn Chua (http://uzyn.com)
+ * Based on work by Matt Zuba's php-trello (https://bitbucket.org/mattzuba/php-trello/overview)
+ * Based on work by opauth-evernote (https://github.com/evernote/opauth-evernote)
  *
  * More information on Opauth: http://opauth.org
  *
- * @copyright    Copyright © 2014 Timm Stokke (http://timm.stokke.me)
+ * @copyright    Copyright © 2015 Timm Stokke (http://timm.stokke.me)
  * @link         http://opauth.org
  * @package      Opauth.TrelloStrategy
  * @license      MIT License
  */
 
+
+/**
+ * @return bool
+ */
+function is_session_started()
+{
+	if ( php_sapi_name() !== 'cli' ) {
+		if ( version_compare(phpversion(), '5.4.0', '>=') ) {
+			return session_status() === PHP_SESSION_ACTIVE ? TRUE : FALSE;
+		} else {
+			return session_id() === '' ? FALSE : TRUE;
+		}
+	}
+	return FALSE;
+}
+
+
 /**
  * Trello strategy for Opauth
+ * based on http://dev.evernote.com/start/core/authentication.php
  *
- * @package			Opauth.Trello
+ * @package      Opauth.Trello
  */
-class TrelloStrategy extends OpauthStrategy {
-
+class TrelloStrategy extends OpauthStrategy
+{
 	/**
 	 * Compulsory config keys, listed as unassociative arrays
 	 */
-	public $expects = array('client_id', 'client_secret');
+	public $expects = array('key', 'secret');
 
 	/**
 	 * Optional config keys, without predefining any default values.
 	 */
-	public $optionals = array('redirect_uri', 'scope', 'state');
+	public $optionals = array('name', 'scope', 'expiration');
 
 	/**
 	 * Optional config keys with respective default values, listed as associative arrays
-	 * eg. array('scope' => 'email');
+	 * eg. array('scope' => 'read,write,account');
 	 */
 	public $defaults = array(
-		'redirect_uri' => '{complete_url_to_strategy}oauth2callback'
+		'oauth_callback' => '{complete_url_to_strategy}oauth_callback',
+		'base_url' => 'https://trello.com/1/',
+		'request_token_path' => 'OAuthGetRequestToken',
+		'authorize_path'     => 'OAuthAuthorizeToken',
+		'access_token_path'  => 'OAuthGetAccessToken',
 	);
+
+	public function __construct($strategy, $env) {
+		parent::__construct($strategy, $env);
+
+		$this->strategy['consumer_key'] = $this->strategy['key'];
+		$this->strategy['consumer_secret'] = $this->strategy['secret'];
+
+		$this->strategy['request_token_url'] = $this->strategy['base_url'].$this->strategy['request_token_path'];
+		$this->strategy['authorize_url'] = $this->strategy['base_url'].$this->strategy['authorize_path'];
+		$this->strategy['access_token_url'] = $this->strategy['base_url'].$this->strategy['access_token_path'];
+
+		require dirname(__FILE__).'/Vendor/OAuthSimple.php';
+
+		$this->oauth = new OAuthSimple( $this->strategy['consumer_key'], $this->strategy['consumer_secret']);
+	}
 
 	/**
 	 * Auth request
 	 */
 	public function request() {
-		$url = 'https://api.trelloapp.com/oauth2/authorize';
-		$params = array(
-			'client_id' => $this->strategy['client_id'],
-			'redirect_uri' => $this->strategy['redirect_uri'],
-			'response_type' => 'code',
+
+		if (is_session_started() === FALSE) {
+			session_start();
+		}
+
+		$options = array(
+			'name' => null,
+			'redirect_uri' => $this->strategy['oauth_callback'],
+			'expiration' => 'never',
+			'scope' => array(
+				'read' => true,
+				'write' => false,
+				'account' => false,
+			),
 		);
 
 		foreach ($this->optionals as $key) {
-			if (!empty($this->strategy[$key])) $params[$key] = $this->strategy[$key];
+			if ($key == 'scope') {
+				foreach(explode(',',$this->strategy[$key]) as $scope) {
+					$options['scope'][$scope] = true;
+				}
+			} elseif (!empty($this->strategy[$key])) {
+				$options[$key] = $this->strategy[$key];
+			}
 		}
 
-		$this->clientGet($url, $params);
+		$scope = implode(',', array_keys(array_filter($options['scope'])));
+
+		// Get a request token from Trello
+		$request = $this->oauth->sign(array(
+			'path' => $this->strategy['request_token_url'],
+			'parameters' => array(
+				'oauth_callback' => $options['redirect_uri'],
+			)
+		));
+
+		$ch = curl_init($request['signed_url']);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		$result = curl_exec($ch);
+
+		// We store the token_secret for later because it's needed to get a permanent one
+		parse_str($result, $returned_items);
+		$request_token = $returned_items['oauth_token'];
+		$_SESSION['oauth_token_secret'] = $returned_items['oauth_token_secret'];
+
+		// Create and process a request with all of our options for Authorization
+		$request = $this->oauth->sign(array(
+			'path' => $this->strategy['authorize_url'],
+			'parameters' => array(
+				'oauth_token' => $request_token,
+				'name' => $options['name'],
+				'expiration' => $options['expiration'],
+				'scope' => $scope,
+			)
+		));
+
+		header("Location: $request[signed_url]");
+		exit;
 	}
 
 	/**
-	 * Internal callback, after OAuth
+	 * Receives oauth_verifier, requests for access_token and redirect to callback
 	 */
-	public function oauth2callback() {
-		if (array_key_exists('code', $_GET) && !empty($_GET['code'])) {
-			$code = $_GET['code'];
-			$url = 'https://api.trelloapp.com/oauth2/token';
+	public function oauth_callback()
+	{
+		if (is_session_started() === FALSE) {
+			session_start();
+		}
 
-			$params = array(
-				'code' => $code,
-				'client_id' => $this->strategy['client_id'],
-				'client_secret' => $this->strategy['client_secret'],
-				'redirect_uri' => $this->strategy['redirect_uri'],
-				'grant_type' => 'authorization_code',
-			);
+		// User cancelled auth
+		if (!isset($_SESSION['oauth_token_secret']) || !isset($_GET['oauth_token'])) {
+            $error = array(
+                'code' => 'access_denied',
+                'message' => 'User denied access.',
+                'raw' => $_GET
+            );
+            $this->errorCallback($error);
+            exit;
+		}
 
-			if (!empty($this->strategy['state'])) $params['state'] = $this->strategy['state'];
 
-			$response = $this->serverPost($url, $params, null, $headers);
-			$results = json_decode($response,true);
+		// $_SESSION[oauth_token_secret] was stored before the Authorization redirect
+		$signatures = array(
+			'oauth_secret' => $_SESSION['oauth_token_secret'],
+			'oauth_token' => $_GET['oauth_token'],
+		);
 
-			if (!empty($results) && !empty($results['access_token'])) {
-				$user = $this->user($results['access_token']);
+		$request = $this->oauth->sign(array(
+			'path' => $this->strategy['access_token_url'],
+			'parameters' => array(
+				'oauth_verifier' => $_GET['oauth_verifier'],
+				'oauth_token' => $_GET['oauth_token'],
+			),
+			'signatures' => $signatures,
+		));
+
+		// Initiate our request to get a permanent access token
+		$ch = curl_init($request['signed_url']);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		$result = curl_exec($ch);
+
+		// Parse our tokens and store them
+		parse_str($result, $returned_items);
+		$token = $returned_items['oauth_token'];
+		$secret = $returned_items['oauth_token_secret'];
+
+		// To prevent a refresh of the page from working to re-do this step, clear out the temp
+		// access token.
+		unset($_SESSION['oauth_token_secret']);
+
+		if ($token && $secret) {
+
+			$url = $this->strategy['base_url'].'members/me';
+			$data = ['key' => $this->strategy['consumer_key'], 'token' => $token];
+
+			$results = $this->serverGet($url, $data);
+
+			if ($results !== false && $user = json_decode($results,true)) {
 
 				$this->auth = array(
-					'uid' => $user['user']['id'],
+					'uid' => $user['id'],
 					'info' => array(
-						'name' => $user['user']['first_name'].' '.$user['user']['last_name'],
-						'image' => $user['company']['base_uri'].$user['user']['avatar_url'],
+						'name' => $user['fullName'],
+						'email' => $user['email'],
+						'username' => $user['username'],
+						'image' => 'http://www.gravatar.com/avatar/'.$user['gravatarHash'],
 					),
 					'credentials' => array(
-						'token' => $results['access_token'],
-						'refresh_token' =>  $results['refresh_token'],
-						'expires_in' =>  $results['expires_in'],
+                        'token' => $token,
+                        'secret' => $secret
 					),
 					'raw' => $user
 				);
 
-				$this->mapProfile($user, 'user.first_name', 'info.first_name'); // look into setting full name here
-				$this->mapProfile($user, 'user.last_name', 'info.last_name');
-				$this->mapProfile($user, 'user.email', 'info.email');
-				$this->mapProfile($user, 'company.base_uri', 'info.urls.base_uri');
-
 				$this->callback();
-			}
-			else {
+			} else {
 				$error = array(
-					'code' => 'access_token_error',
-					'message' => 'Failed when attempting to obtain access token',
-					'raw' => array(
-						'response' => $response,
-						'headers' => $headers
-					)
+					'code' => 'missing_user_details',
+					'message' => 'Could not retrieve user details.',
+					'raw' => $results
 				);
-
 				$this->errorCallback($error);
 			}
-		}
-		else {
+		} else {
 			$error = array(
-				'code' => 'oauth2callback_error',
+				'code' => 'access_denied',
+				'message' => 'User denied access.',
 				'raw' => $_GET
 			);
-
 			$this->errorCallback($error);
 		}
+
 	}
 
-	/**
-	 * Queries Trello API for user info
-	 *
-	 * @link         https://github.com/trellohq/api/blob/master/Authentication/OAuth%202.0.md#for-server-side-applications
-	 * @param string $access_token
-	 * @return array Parsed JSON results
-	 */
-	private function user($access_token) {
 
-		$options['http']['header'] = "Content-Type: application/json";
-		$options['http']['header'] .= "\r\nAccept: application/json";
-
-		$user = $this->serverGet('https://api.trelloapp.com/account/who_am_i', array('access_token' => $access_token), $options, $headers);
-
-		if (!empty($user)) {
-			return $this->recursiveGetObjectVars(json_decode($user));
-		}
-		else {
-			$error = array(
-				'code' => 'userinfo_error',
-				'message' => 'Failed when attempting to query Trello API for user information',
-				'raw' => array(
-					'response' => $user,
-					'headers' => $headers
-				)
-			);
-
-			$this->errorCallback($error);
-		}
-	}
 }
