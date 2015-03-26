@@ -151,13 +151,13 @@ class TrelloStrategy extends OpauthStrategy
 
 		// User cancelled auth
 		if (!isset($_SESSION['oauth_token_secret']) || !isset($_GET['oauth_token'])) {
-            $error = array(
-                'code' => 'access_denied',
-                'message' => 'User denied access.',
-                'raw' => $_GET
-            );
-            $this->errorCallback($error);
-            exit;
+			$error = array(
+				'code' => 'access_denied',
+				'message' => 'User denied access.',
+				'raw' => $_GET
+			);
+			$this->errorCallback($error);
+			exit;
 		}
 
 
@@ -208,8 +208,8 @@ class TrelloStrategy extends OpauthStrategy
 						'image' => 'http://www.gravatar.com/avatar/'.$user['gravatarHash'],
 					),
 					'credentials' => array(
-                        'token' => $token,
-                        'secret' => $secret
+						'token' => $token,
+						'secret' => $secret
 					),
 					'raw' => $user
 				);
