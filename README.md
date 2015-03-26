@@ -28,7 +28,7 @@ Getting started
 
 2. Create Trello application at https://trello.com/1/appKey/generate
 
-3. Configure Opauth-Trello strategy with at least `Client ID` and `Client Secret`.
+3. Configure Opauth-Trello strategy with at least `Key` and `Secret`.
 
 4. Direct user to `http://path_to_opauth/trello` to authenticate
 
@@ -40,14 +40,18 @@ Required parameters:
 ```php
 <?php
 'Trello' => array(
-	'client_id' => 'YOUR CLIENT ID',
-	'client_secret' => 'YOUR CLIENT SECRET'
+	'key' => 'YOUR CLIENT KEY',
+	'secret' => 'YOUR CLIENT SECRET',
+	// Optionally, specify:
+	'name' => 'YOUR APP NAME (appears in auth screen)',
+	'expiration' => 'never',
+	'scope' => 'read,write'
 )
 ```
 
 License
 ---------
 Opauth-Trello is MIT Licensed
-Copyright © 2014 Timm Stokke (http://timm.stokke.me)
+Copyright © 2015 Timm Stokke (http://timm.stokke.me)
 
 [1]: https://github.com/opauth/opauth
